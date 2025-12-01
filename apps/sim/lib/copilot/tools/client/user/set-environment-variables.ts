@@ -6,6 +6,7 @@ import {
 } from '@/lib/copilot/tools/client/base-tool'
 import { ExecuteResponseSuccessSchema } from '@/lib/copilot/tools/shared/schemas'
 import { createLogger } from '@/lib/logs/console/logger'
+import { useEnvironmentStore } from '@/stores/settings/environment/store'
 import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
 
 interface SetEnvArgs {
@@ -47,6 +48,30 @@ export class SetEnvironmentVariablesClientTool extends BaseClientTool {
       accept: { text: 'Apply', icon: Settings2 },
       reject: { text: 'Skip', icon: XCircle },
     },
+    getDynamicText: (params, state) => {
+      if (params?.variables && typeof params.variables === 'object') {
+        const count = Object.keys(params.variables).length
+        const varText = count === 1 ? 'variable' : 'variables'
+
+        switch (state) {
+          case ClientToolCallState.success:
+            return `Set ${count} ${varText}`
+          case ClientToolCallState.executing:
+            return `Setting ${count} ${varText}`
+          case ClientToolCallState.generating:
+            return `Preparing to set ${count} ${varText}`
+          case ClientToolCallState.pending:
+            return `Set ${count} ${varText}?`
+          case ClientToolCallState.error:
+            return `Failed to set ${count} ${varText}`
+          case ClientToolCallState.aborted:
+            return `Aborted setting ${count} ${varText}`
+          case ClientToolCallState.rejected:
+            return `Skipped setting ${count} ${varText}`
+        }
+      }
+      return undefined
+    },
   }
 
   async handleReject(): Promise<void> {
@@ -77,6 +102,14 @@ export class SetEnvironmentVariablesClientTool extends BaseClientTool {
       this.setState(ClientToolCallState.success)
       await this.markToolComplete(200, 'Environment variables updated', parsed.result)
       this.setState(ClientToolCallState.success)
+
+      // Refresh the environment store so the UI reflects the new variables
+      try {
+        await useEnvironmentStore.getState().loadEnvironmentVariables()
+        logger.info('Environment store refreshed after setting variables')
+      } catch (error) {
+        logger.warn('Failed to refresh environment store:', error)
+      }
     } catch (e: any) {
       logger.error('execute failed', { message: e?.message })
       this.setState(ClientToolCallState.error)

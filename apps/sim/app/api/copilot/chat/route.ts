@@ -17,9 +17,8 @@ import { env } from '@/lib/env'
 import { createLogger } from '@/lib/logs/console/logger'
 import { SIM_AGENT_API_URL_DEFAULT, SIM_AGENT_VERSION } from '@/lib/sim-agent/constants'
 import { generateChatTitle } from '@/lib/sim-agent/utils'
-import { createFileContent, isSupportedFileType } from '@/lib/uploads/file-utils'
-import { S3_COPILOT_CONFIG } from '@/lib/uploads/setup'
-import { downloadFile, getStorageProvider } from '@/lib/uploads/storage-client'
+import { CopilotFiles } from '@/lib/uploads'
+import { createFileContent } from '@/lib/uploads/utils/file-utils'
 
 const logger = createLogger('CopilotChatAPI')
 
@@ -44,16 +43,24 @@ const ChatMessageSchema = z.object({
       'gpt-5',
       'gpt-5-medium',
       'gpt-5-high',
+      'gpt-5.1-fast',
+      'gpt-5.1',
+      'gpt-5.1-medium',
+      'gpt-5.1-high',
+      'gpt-5-codex',
+      'gpt-5.1-codex',
       'gpt-4o',
       'gpt-4.1',
       'o3',
       'claude-4-sonnet',
+      'claude-4.5-haiku',
       'claude-4.5-sonnet',
+      'claude-4.5-opus',
       'claude-4.1-opus',
     ])
     .optional()
     .default('claude-4.5-sonnet'),
-  mode: z.enum(['ask', 'agent']).optional().default('agent'),
+  mode: z.enum(['ask', 'agent', 'plan']).optional().default('agent'),
   prefetch: z.boolean().optional(),
   createNewChat: z.boolean().optional().default(false),
   stream: z.boolean().optional().default(true),
@@ -201,45 +208,15 @@ export async function POST(req: NextRequest) {
     // Process file attachments if present
     const processedFileContents: any[] = []
     if (fileAttachments && fileAttachments.length > 0) {
-      for (const attachment of fileAttachments) {
-        try {
-          // Check if file type is supported
-          if (!isSupportedFileType(attachment.media_type)) {
-            logger.warn(`[${tracker.requestId}] Unsupported file type: ${attachment.media_type}`)
-            continue
-          }
+      const processedAttachments = await CopilotFiles.processCopilotAttachments(
+        fileAttachments,
+        tracker.requestId
+      )
 
-          const storageProvider = getStorageProvider()
-          let fileBuffer: Buffer
-
-          if (storageProvider === 's3') {
-            fileBuffer = await downloadFile(attachment.key, {
-              bucket: S3_COPILOT_CONFIG.bucket,
-              region: S3_COPILOT_CONFIG.region,
-            })
-          } else if (storageProvider === 'blob') {
-            const { BLOB_COPILOT_CONFIG } = await import('@/lib/uploads/setup')
-            fileBuffer = await downloadFile(attachment.key, {
-              containerName: BLOB_COPILOT_CONFIG.containerName,
-              accountName: BLOB_COPILOT_CONFIG.accountName,
-              accountKey: BLOB_COPILOT_CONFIG.accountKey,
-              connectionString: BLOB_COPILOT_CONFIG.connectionString,
-            })
-          } else {
-            fileBuffer = await downloadFile(attachment.key)
-          }
-
-          // Convert to format
-          const fileContent = createFileContent(fileBuffer, attachment.media_type)
-          if (fileContent) {
-            processedFileContents.push(fileContent)
-          }
-        } catch (error) {
-          logger.error(
-            `[${tracker.requestId}] Failed to process file ${attachment.filename}:`,
-            error
-          )
-          // Continue processing other files
+      for (const { buffer, attachment } of processedAttachments) {
+        const fileContent = createFileContent(buffer, attachment.media_type)
+        if (fileContent) {
+          processedFileContents.push(fileContent)
         }
       }
     }
@@ -253,39 +230,15 @@ export async function POST(req: NextRequest) {
         // This is a message with file attachments - rebuild with content array
         const content: any[] = [{ type: 'text', text: msg.content }]
 
-        // Process file attachments for historical messages
-        for (const attachment of msg.fileAttachments) {
-          try {
-            if (isSupportedFileType(attachment.media_type)) {
-              const storageProvider = getStorageProvider()
-              let fileBuffer: Buffer
+        const processedHistoricalAttachments = await CopilotFiles.processCopilotAttachments(
+          msg.fileAttachments,
+          tracker.requestId
+        )
 
-              if (storageProvider === 's3') {
-                fileBuffer = await downloadFile(attachment.key, {
-                  bucket: S3_COPILOT_CONFIG.bucket,
-                  region: S3_COPILOT_CONFIG.region,
-                })
-              } else if (storageProvider === 'blob') {
-                const { BLOB_COPILOT_CONFIG } = await import('@/lib/uploads/setup')
-                fileBuffer = await downloadFile(attachment.key, {
-                  containerName: BLOB_COPILOT_CONFIG.containerName,
-                  accountName: BLOB_COPILOT_CONFIG.accountName,
-                  accountKey: BLOB_COPILOT_CONFIG.accountKey,
-                  connectionString: BLOB_COPILOT_CONFIG.connectionString,
-                })
-              } else {
-                fileBuffer = await downloadFile(attachment.key)
-              }
-              const fileContent = createFileContent(fileBuffer, attachment.media_type)
-              if (fileContent) {
-                content.push(fileContent)
-              }
-            }
-          } catch (error) {
-            logger.error(
-              `[${tracker.requestId}] Failed to process historical file ${attachment.filename}:`,
-              error
-            )
+        for (const { buffer, attachment } of processedHistoricalAttachments) {
+          const fileContent = createFileContent(buffer, attachment.media_type)
+          if (fileContent) {
+            content.push(fileContent)
           }
         }
 
@@ -356,18 +309,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Determine provider and conversationId to use for this request
+    // Determine conversationId to use for this request
     const effectiveConversationId =
       (currentChat?.conversationId as string | undefined) || conversationId
 
-    // If we have a conversationId, only send the most recent user message; else send full history
-    const latestUserMessage =
-      [...messages].reverse().find((m) => m?.role === 'user') || messages[messages.length - 1]
-    const messagesForAgent = effectiveConversationId ? [latestUserMessage] : messages
-
     const requestPayload = {
-      messages: messagesForAgent,
-      chatMessages: messages, // Full unfiltered messages array
+      message: message, // Just send the current user message text
       workflowId,
       userId: authenticatedUserId,
       stream: stream,
@@ -382,14 +329,16 @@ export async function POST(req: NextRequest) {
       ...(session?.user?.name && { userName: session.user.name }),
       ...(agentContexts.length > 0 && { context: agentContexts }),
       ...(actualChatId ? { chatId: actualChatId } : {}),
+      ...(processedFileContents.length > 0 && { fileAttachments: processedFileContents }),
     }
 
     try {
-      logger.info(`[${tracker.requestId}] About to call Sim Agent with context`, {
-        context: (requestPayload as any).context,
-        messagesCount: messagesForAgent.length,
-        chatMessagesCount: messages.length,
+      logger.info(`[${tracker.requestId}] About to call Sim Agent`, {
+        hasContext: agentContexts.length > 0,
+        contextCount: agentContexts.length,
         hasConversationId: !!effectiveConversationId,
+        hasFileAttachments: processedFileContents.length > 0,
+        messageLength: message.length,
       })
     } catch {}
 
@@ -462,8 +411,6 @@ export async function POST(req: NextRequest) {
             controller.enqueue(encoder.encode(chatIdEvent))
             logger.debug(`[${tracker.requestId}] Sent initial chatId event to client`)
           }
-
-          // Note: context_usage events are forwarded from sim-agent (which has accurate token counts)
 
           // Start title generation in parallel if needed
           if (actualChatId && !currentChat?.title && conversationHistory.length === 0) {
@@ -596,7 +543,6 @@ export async function POST(req: NextRequest) {
                             lastSafeDoneResponseId = responseIdFromDone
                           }
                         }
-                        // Note: context_usage events are forwarded from sim-agent
                         break
 
                       case 'error':
@@ -941,6 +887,8 @@ export async function GET(req: NextRequest) {
         title: copilotChats.title,
         model: copilotChats.model,
         messages: copilotChats.messages,
+        planArtifact: copilotChats.planArtifact,
+        config: copilotChats.config,
         createdAt: copilotChats.createdAt,
         updatedAt: copilotChats.updatedAt,
       })
@@ -958,6 +906,8 @@ export async function GET(req: NextRequest) {
       messages: Array.isArray(chat.messages) ? chat.messages : [],
       messageCount: Array.isArray(chat.messages) ? chat.messages.length : 0,
       previewYaml: null, // Not needed for chat list
+      planArtifact: chat.planArtifact || null,
+      config: chat.config || null,
       createdAt: chat.createdAt,
       updatedAt: chat.updatedAt,
     }))

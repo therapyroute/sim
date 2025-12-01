@@ -11,8 +11,8 @@ import { quickValidateEmail } from '@/lib/email/validation'
 import { env, isFalsy } from '@/lib/env'
 import { createLogger } from '@/lib/logs/console/logger'
 import { cn } from '@/lib/utils'
-import { inter } from '@/app/fonts/inter'
-import { soehne } from '@/app/fonts/soehne/soehne'
+import { inter } from '@/app/_styles/fonts/inter/inter'
+import { soehne } from '@/app/_styles/fonts/soehne/soehne'
 
 const logger = createLogger('SSOForm')
 
@@ -69,6 +69,12 @@ export default function SSOForm() {
         } else {
           logger.warn('Invalid callback URL detected and blocked:', { url: callback })
         }
+      }
+
+      // Pre-fill email if provided in URL (e.g., from deployed chat SSO)
+      const emailParam = searchParams.get('email')
+      if (emailParam) {
+        setEmail(emailParam)
       }
 
       // Check for SSO error from redirect

@@ -1,13 +1,11 @@
 import { db } from '@sim/db'
 import { chat, workflow } from '@sim/db/schema'
 import { eq } from 'drizzle-orm'
-import { type NextRequest, NextResponse } from 'next/server'
+import type { NextRequest, NextResponse } from 'next/server'
 import { isDev } from '@/lib/environment'
-import { processExecutionFiles } from '@/lib/execution/files'
 import { createLogger } from '@/lib/logs/console/logger'
 import { hasAdminPermission } from '@/lib/permissions/utils'
 import { decryptSecret } from '@/lib/utils'
-import type { UserFile } from '@/executor/types'
 
 const logger = createLogger('ChatAuthUtils')
 
@@ -19,7 +17,6 @@ export async function checkWorkflowAccessForChatCreation(
   workflowId: string,
   userId: string
 ): Promise<{ hasAccess: boolean; workflow?: any }> {
-  // Get workflow data
   const workflowData = await db.select().from(workflow).where(eq(workflow.id, workflowId)).limit(1)
 
   if (workflowData.length === 0) {
@@ -28,12 +25,10 @@ export async function checkWorkflowAccessForChatCreation(
 
   const workflowRecord = workflowData[0]
 
-  // Case 1: User owns the workflow directly
   if (workflowRecord.userId === userId) {
     return { hasAccess: true, workflow: workflowRecord }
   }
 
-  // Case 2: Workflow belongs to a workspace and user has admin permission
   if (workflowRecord.workspaceId) {
     const hasAdmin = await hasAdminPermission(userId, workflowRecord.workspaceId)
     if (hasAdmin) {
@@ -52,7 +47,6 @@ export async function checkChatAccess(
   chatId: string,
   userId: string
 ): Promise<{ hasAccess: boolean; chat?: any }> {
-  // Get chat with workflow information
   const chatData = await db
     .select({
       chat: chat,
@@ -69,12 +63,10 @@ export async function checkChatAccess(
 
   const { chat: chatRecord, workflowWorkspaceId } = chatData[0]
 
-  // Case 1: User owns the chat directly
   if (chatRecord.userId === userId) {
     return { hasAccess: true, chat: chatRecord }
   }
 
-  // Case 2: Chat's workflow belongs to a workspace and user has admin permission
   if (workflowWorkspaceId) {
     const hasAdmin = await hasAdminPermission(userId, workflowWorkspaceId)
     if (hasAdmin) {
@@ -85,7 +77,7 @@ export async function checkChatAccess(
   return { hasAccess: false }
 }
 
-export const encryptAuthToken = (chatId: string, type: string): string => {
+const encryptAuthToken = (chatId: string, type: string): string => {
   return Buffer.from(`${chatId}:${type}:${Date.now()}`).toString('base64')
 }
 
@@ -94,12 +86,10 @@ export const validateAuthToken = (token: string, chatId: string): boolean => {
     const decoded = Buffer.from(token, 'base64').toString()
     const [storedId, _type, timestamp] = decoded.split(':')
 
-    // Check if token is for this chat
     if (storedId !== chatId) {
       return false
     }
 
-    // Check if token is not expired (24 hours)
     const createdAt = Number.parseInt(timestamp)
     const now = Date.now()
     const expireTime = 24 * 60 * 60 * 1000 // 24 hours
@@ -114,10 +104,8 @@ export const validateAuthToken = (token: string, chatId: string): boolean => {
   }
 }
 
-// Set cookie helper function
 export const setChatAuthCookie = (response: NextResponse, chatId: string, type: string): void => {
   const token = encryptAuthToken(chatId, type)
-  // Set cookie with HttpOnly and secure flags
   response.cookies.set({
     name: `chat_auth_${chatId}`,
     value: token,
@@ -129,12 +117,9 @@ export const setChatAuthCookie = (response: NextResponse, chatId: string, type: 
   })
 }
 
-// Helper function to add CORS headers to responses
 export function addCorsHeaders(response: NextResponse, request: NextRequest) {
-  // Get the origin from the request
   const origin = request.headers.get('origin') || ''
 
-  // In development, allow any localhost subdomain
   if (isDev && origin.includes('localhost')) {
     response.headers.set('Access-Control-Allow-Origin', origin)
     response.headers.set('Access-Control-Allow-Credentials', 'true')
@@ -145,13 +130,6 @@ export function addCorsHeaders(response: NextResponse, request: NextRequest) {
   return response
 }
 
-// Handle OPTIONS requests for CORS preflight
-export async function OPTIONS(request: NextRequest) {
-  const response = new NextResponse(null, { status: 204 })
-  return addCorsHeaders(response, request)
-}
-
-// Validate authentication for chat access
 export async function validateChatAuth(
   requestId: string,
   deployment: any,
@@ -160,12 +138,10 @@ export async function validateChatAuth(
 ): Promise<{ authorized: boolean; error?: string }> {
   const authType = deployment.authType || 'public'
 
-  // Public chats are accessible to everyone
   if (authType === 'public') {
     return { authorized: true }
   }
 
-  // Check for auth cookie first
   const cookieName = `chat_auth_${deployment.id}`
   const authCookie = request.cookies.get(cookieName)
 
@@ -173,22 +149,18 @@ export async function validateChatAuth(
     return { authorized: true }
   }
 
-  // For password protection, check the password in the request body
   if (authType === 'password') {
-    // For GET requests, we just notify the client that authentication is required
     if (request.method === 'GET') {
       return { authorized: false, error: 'auth_required_password' }
     }
 
     try {
-      // Use the parsed body if provided, otherwise the auth check is not applicable
       if (!parsedBody) {
         return { authorized: false, error: 'Password is required' }
       }
 
       const { password, input } = parsedBody
 
-      // If this is a chat message, not an auth attempt
       if (input && !password) {
         return { authorized: false, error: 'auth_required_password' }
       }
@@ -202,7 +174,6 @@ export async function validateChatAuth(
         return { authorized: false, error: 'Authentication configuration error' }
       }
 
-      // Decrypt the stored password and compare
       const { decrypted } = await decryptSecret(deployment.password)
       if (password !== decrypted) {
         return { authorized: false, error: 'Invalid password' }
@@ -215,22 +186,18 @@ export async function validateChatAuth(
     }
   }
 
-  // For email access control, check the email in the request body
   if (authType === 'email') {
-    // For GET requests, we just notify the client that authentication is required
     if (request.method === 'GET') {
       return { authorized: false, error: 'auth_required_email' }
     }
 
     try {
-      // Use the parsed body if provided, otherwise the auth check is not applicable
       if (!parsedBody) {
         return { authorized: false, error: 'Email is required' }
       }
 
       const { email, input } = parsedBody
 
-      // If this is a chat message, not an auth attempt
       if (input && !email) {
         return { authorized: false, error: 'auth_required_email' }
       }
@@ -241,17 +208,12 @@ export async function validateChatAuth(
 
       const allowedEmails = deployment.allowedEmails || []
 
-      // Check exact email matches
       if (allowedEmails.includes(email)) {
-        // Email is allowed but still needs OTP verification
-        // Return a special error code that the client will recognize
         return { authorized: false, error: 'otp_required' }
       }
 
-      // Check domain matches (prefixed with @)
       const domain = email.split('@')[1]
       if (domain && allowedEmails.some((allowed: string) => allowed === `@${domain}`)) {
-        // Domain is allowed but still needs OTP verification
         return { authorized: false, error: 'otp_required' }
       }
 
@@ -262,27 +224,70 @@ export async function validateChatAuth(
     }
   }
 
-  // Unknown auth type
+  if (authType === 'sso') {
+    if (request.method === 'GET') {
+      return { authorized: false, error: 'auth_required_sso' }
+    }
+
+    try {
+      if (!parsedBody) {
+        return { authorized: false, error: 'SSO authentication is required' }
+      }
+
+      const { email, input, checkSSOAccess } = parsedBody
+
+      if (input && !checkSSOAccess) {
+        return { authorized: false, error: 'auth_required_sso' }
+      }
+
+      if (checkSSOAccess) {
+        if (!email) {
+          return { authorized: false, error: 'Email is required' }
+        }
+
+        const allowedEmails = deployment.allowedEmails || []
+
+        if (allowedEmails.includes(email)) {
+          return { authorized: true }
+        }
+
+        const domain = email.split('@')[1]
+        if (domain && allowedEmails.some((allowed: string) => allowed === `@${domain}`)) {
+          return { authorized: true }
+        }
+
+        return { authorized: false, error: 'Email not authorized for SSO access' }
+      }
+
+      const { auth } = await import('@/lib/auth')
+      const session = await auth.api.getSession({ headers: request.headers })
+
+      if (!session || !session.user) {
+        return { authorized: false, error: 'auth_required_sso' }
+      }
+
+      const userEmail = session.user.email
+      if (!userEmail) {
+        return { authorized: false, error: 'SSO session does not contain email' }
+      }
+
+      const allowedEmails = deployment.allowedEmails || []
+
+      if (allowedEmails.includes(userEmail)) {
+        return { authorized: true }
+      }
+
+      const domain = userEmail.split('@')[1]
+      if (domain && allowedEmails.some((allowed: string) => allowed === `@${domain}`)) {
+        return { authorized: true }
+      }
+
+      return { authorized: false, error: 'Your email is not authorized to access this chat' }
+    } catch (error) {
+      logger.error(`[${requestId}] Error validating SSO:`, error)
+      return { authorized: false, error: 'SSO authentication error' }
+    }
+  }
+
   return { authorized: false, error: 'Unsupported authentication type' }
-}
-
-/**
- * Process and upload chat files to execution storage
- * Handles both base64 dataUrl format and direct URL pass-through
- * Delegates to shared execution file processing logic
- */
-export async function processChatFiles(
-  files: Array<{ dataUrl?: string; url?: string; name: string; type: string }>,
-  executionContext: { workspaceId: string; workflowId: string; executionId: string },
-  requestId: string
-): Promise<UserFile[]> {
-  // Transform chat file format to shared execution file format
-  const transformedFiles = files.map((file) => ({
-    type: file.dataUrl ? 'file' : 'url',
-    data: file.dataUrl || file.url || '',
-    name: file.name,
-    mime: file.type,
-  }))
-
-  return processExecutionFiles(transformedFiles, executionContext, requestId)
 }
